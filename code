@@ -1,0 +1,179 @@
+// mode select (sequential/bounce/random)
+   
+
+// Pins
+const byte BTN  = 2;
+const byte BUZZ = 9;
+
+const byte NLEDS = 9;
+const byte LEDS[9] = {3,4,5,6,7,8,10,11,12};
+
+// Colour tags
+#define COL_R 0
+#define COL_Y 1
+#define COL_G 2
+const byte LED_COL[9] = {COL_R, COL_R, COL_R, COL_Y, COL_G, COL_Y, COL_R, COL_R, COL_R};
+
+// Timing
+const byte MAX_LEVEL = 14;
+const unsigned int MIN_DWELL = 95;
+const unsigned int DWELL[15] = {
+  0, 300,275,250,230,210,190,175,160,145,132,120,110,100,90
+};
+unsigned int dwellNow(byte lv){
+  if(lv > MAX_LEVEL) lv = MAX_LEVEL;
+  unsigned int d = DWELL[lv];
+  if(d < MIN_DWELL) d = MIN_DWELL;
+  return d;
+}
+
+// Beeps
+void beep(unsigned int f, unsigned int t){ tone(BUZZ,f,t); delay(t+40); } // only used at boot
+void beepOK(){ tone(BUZZ,1200,80); tone(BUZZ,1600,80); }
+void beepNeutral(){ tone(BUZZ,1000,80); }
+void beepFail(){ tone(BUZZ,300,180); }
+
+// Debounce
+int btnReading = HIGH, btnState = HIGH, lastRead = HIGH;
+unsigned long lastDebounceTime = 0;
+const unsigned long debounceDelay = 20;
+
+bool pressEdge(unsigned long now){
+  btnReading = digitalRead(BTN);
+  if(btnReading != lastRead) lastDebounceTime = now;
+  if(now - lastDebounceTime > debounceDelay){
+    if(btnState != btnReading){
+      btnState = btnReading;
+      if(btnState == LOW){ lastRead = btnReading; return true; }
+    }
+  }
+  lastRead = btnReading;
+  return false;
+}
+
+// Modes
+#define MODE_SEQ    0
+#define MODE_BOUNCE 1
+#define MODE_RANDOM 2
+byte mode = MODE_SEQ;            // chosen at boot
+int  dir  = +1;                  // for bounce
+byte order[9]; 
+int pos = -1;     				 // for random
+bool randStarted = false;
+
+void shuffleOrder(){
+  for(byte i=0;i<NLEDS;i++) order[i]=i;
+  for(int i=NLEDS-1;i>0;i--){
+    int j = random(i+1);
+    byte t = order[i]; order[i] = order[j]; order[j] = t;
+  }
+  pos = -1; randStarted = false;
+}
+
+byte nextIndex(byte current){
+  if(mode == MODE_RANDOM){
+    pos = pos + 1;
+    if(pos >= NLEDS){
+      pos = 0;
+      // set to 1 to reshuffle every wrap; 0 to keep learnable order
+      const byte RANDOM_SHUFFLE_ON_WRAP = 0;
+      if(randStarted && RANDOM_SHUFFLE_ON_WRAP) shuffleOrder();
+      randStarted = true;
+    }
+    return order[pos];
+  }
+
+  if(mode == MODE_BOUNCE){
+    if(current < 0) return 0;
+    int n = current + dir;
+    if(n >= NLEDS){ dir = -1; n = NLEDS - 2; }
+    if(n < 0){      dir = +1; n = 1; }
+    return (byte)n;
+  }
+
+  // MODE_SEQ
+  if(current < 0) return 0;
+  byte n = current + 1;
+  if(n >= NLEDS) n = 0;
+  return n;
+}
+
+// Game State
+#define STATE_STEP_ON  0
+#define STATE_DWELL    1
+byte  state = STATE_STEP_ON;
+byte  level = 1;
+int   idx   = -1;
+unsigned long tLed = 0;
+
+// Mode Select
+byte selectModeOnBoot(){
+  // Hold BTN at power: ~1s = BOUNCE, >1.5s = RANDOM, else SEQ
+  unsigned long t0 = millis();
+  unsigned long firstLow = 0;
+  unsigned long dur = 0;
+
+  while(millis() - t0 < 2200){
+    if(digitalRead(BTN) == LOW){
+      if(firstLow == 0) firstLow = millis();
+      dur = millis() - firstLow;
+    } else if(firstLow != 0){
+      break;
+    }
+  }
+
+  if(dur > 1500){ beep(1100,100); beep(1400,100); beep(1700,100); return MODE_RANDOM; }
+  if(dur >  800){ beep(1100,100); beep(1400,100);                  return MODE_BOUNCE; }
+  beep(1000,100); return MODE_SEQ;
+}
+
+// Setup
+void setup(){
+  pinMode(BTN, INPUT_PULLUP);
+  pinMode(BUZZ, OUTPUT);
+  for(byte i=0;i<NLEDS;i++){ pinMode(LEDS[i], OUTPUT); digitalWrite(LEDS[i], LOW); }
+  randomSeed( analogRead(A0) ^ micros() );
+
+  mode = selectModeOnBoot();
+  if(mode == MODE_RANDOM) shuffleOrder();
+}
+
+// Loop
+void loop(){
+  unsigned long now = millis();
+
+  if(state == STATE_STEP_ON){
+    if(idx >= 0) digitalWrite(LEDS[idx], LOW);
+    idx = nextIndex(idx);
+    digitalWrite(LEDS[idx], HIGH);
+    tLed = now;
+    state = STATE_DWELL;
+  }
+  else if(state == STATE_DWELL){
+    if(pressEdge(now)){
+      if(LED_COL[idx] == COL_G){
+        if(level < MAX_LEVEL) level = level + 1;   // speed up
+        beepOK();
+      } else if(LED_COL[idx] == COL_Y){
+        beepNeutral();                             // same level
+      } else {
+        if(level > 1) level = level - 1;           // red = down one level
+        										   // to reset instead: level = 1;
+        beepFail();
+      }
+
+      // When holding it will still advance
+      digitalWrite(LEDS[idx], LOW);
+      idx = nextIndex(idx);
+      digitalWrite(LEDS[idx], HIGH);
+      tLed = now;
+    }
+
+    if(now - tLed >= dwellNow(level)){
+      digitalWrite(LEDS[idx], LOW);
+      idx = nextIndex(idx);
+      digitalWrite(LEDS[idx], HIGH);
+      tLed = now;
+    }
+  }
+}
